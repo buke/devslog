@@ -440,6 +440,16 @@ func (h *developHandler) formatError(err error, l int) (b []byte) {
 			b = append(b, ul(cs([]byte(fileLine), fgBlue))...)
 		}
 
+		for j, fileLine := range h.getFileLineFromQuickjs(err) {
+			b = append(b, '\n')
+			tb := strconv.Itoa(j)
+			b = append(b, bytes.Repeat([]byte(" "), l*2+6)...)
+			b = append(b, bytes.Repeat([]byte(" "), len(tb))...)
+			b = append(b, cs([]byte(tb), fgBlue)...)
+			b = append(b, []byte(": ")...)
+			b = append(b, ul(cs([]byte(fileLine), fgBlue))...)
+		}
+
 		err = ue
 	}
 

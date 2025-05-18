@@ -147,11 +147,16 @@ func (h *developHandler) WithAttrs(as []slog.Attr) slog.Handler {
 }
 
 func (h *developHandler) withGroupOrAttrs(goa groupOrAttrs) *developHandler {
-	h2 := *h
-	h2.goas = make([]groupOrAttrs, len(h.goas)+1)
+	h2 := &developHandler{
+		opts: h.opts,
+		goas: make([]groupOrAttrs, len(h.goas)+1),
+		out:  h.out,
+	}
+
 	copy(h2.goas, h.goas)
 	h2.goas[len(h2.goas)-1] = goa
-	return &h2
+
+	return h2
 }
 
 func (h *developHandler) Handle(ctx context.Context, r slog.Record) error {
@@ -217,6 +222,13 @@ func (h *developHandler) levelMessage(b []byte, r *slog.Record) []byte {
 	return b
 }
 
+type visitKey struct {
+	ptr uintptr
+	typ reflect.Type
+}
+
+type visited map[visitKey]struct{}
+
 func (h *developHandler) processAttributes(b []byte, r *slog.Record) []byte {
 	var as attributes
 	r.Attrs(func(a slog.Attr) bool {
@@ -244,7 +256,8 @@ func (h *developHandler) processAttributes(b []byte, r *slog.Record) []byte {
 		}
 	}
 
-	b = h.colorize(b, as, 0, []string{})
+	vi := make(visited)
+	b = h.colorize(b, as, 0, []string{}, vi)
 	if h.opts.NewLineAfterLog {
 		b = append(b, '\n')
 	}
@@ -252,7 +265,7 @@ func (h *developHandler) processAttributes(b []byte, r *slog.Record) []byte {
 	return b
 }
 
-func (h *developHandler) colorize(b []byte, as attributes, l int, g []string) []byte {
+func (h *developHandler) colorize(b []byte, as attributes, l int, g []string, vi visited) []byte {
 	if h.opts.SortKeys {
 		sort.Sort(as)
 	}
@@ -338,16 +351,16 @@ func (h *developHandler) colorize(b []byte, as attributes, l int, g []string) []
 			switch ut.Kind() {
 			case reflect.Array:
 				m = h.cs([]byte("A"), fgGreen)
-				v = h.formatSlice(avt, avv, l)
+				v = h.formatSlice(avt, avv, l, vi)
 			case reflect.Slice:
 				m = h.cs([]byte("S"), fgGreen)
-				v = h.formatSlice(avt, avv, l)
+				v = h.formatSlice(avt, avv, l, vi)
 			case reflect.Map:
 				m = h.cs([]byte("M"), fgGreen)
-				v = h.formatMap(avt, avv, l)
+				v = h.formatMap(avt, avv, l, vi)
 			case reflect.Struct:
 				m = h.cs([]byte("S"), fgYellow)
-				v = h.formatStruct(avt, avv, 0)
+				v = h.formatStruct(avt, avv, 0, vi)
 			case reflect.Float32, reflect.Float64:
 				m = h.cs([]byte("#"), fgYellow)
 				vs = atb(uv.Float())
@@ -384,7 +397,7 @@ func (h *developHandler) colorize(b []byte, as attributes, l int, g []string) []
 			g = append(g, a.Key)
 
 			v = []byte("\n")
-			v = append(v, h.colorize(nil, ga, l+1, g)...)
+			v = append(v, h.colorize(nil, ga, l+1, g, vi)...)
 		}
 
 		b = append(b, bytes.Repeat([]byte(" "), l*2)...)
@@ -468,17 +481,14 @@ func (h *developHandler) formatError(err error, l int) (b []byte) {
 	return b
 }
 
-func (h *developHandler) formatSlice(st reflect.Type, sv reflect.Value, l int) (b []byte) {
+func (h *developHandler) formatSlice(st reflect.Type, sv reflect.Value, l int, vi visited) (b []byte) {
 	ts := h.buildTypeString(st.String())
 	_, sv, _ = h.reducePointerTypeValue(st, sv)
 
 	b = append(b, h.cs([]byte(strconv.Itoa(sv.Len())), fgBlue)...)
 	b = append(b, ' ')
 	b = append(b, ts...)
-	d := len(strconv.Itoa(sv.Len()))
-	if len(strconv.Itoa(int(h.opts.MaxSlicePrintSize))) < d {
-		d = len(strconv.Itoa(int(h.opts.MaxSlicePrintSize)))
-	}
+	d := min(len(strconv.Itoa(int(h.opts.MaxSlicePrintSize))), len(strconv.Itoa(sv.Len())))
 
 	for i := 0; i < sv.Len(); i++ {
 		if i == int(h.opts.MaxSlicePrintSize) {
@@ -500,13 +510,13 @@ func (h *developHandler) formatSlice(st reflect.Type, sv reflect.Value, l int) (
 		b = append(b, h.cs([]byte(tb), fgGreen)...)
 		b = append(b, ':')
 		b = append(b, ' ')
-		b = append(b, h.elementType(t, v, l, l*2+d+2)...)
+		b = append(b, h.elementType(t, v, l, l*2+d+2, vi)...)
 	}
 
 	return b
 }
 
-func (h *developHandler) formatMap(st reflect.Type, sv reflect.Value, l int) (b []byte) {
+func (h *developHandler) formatMap(st reflect.Type, sv reflect.Value, l int, vi visited) (b []byte) {
 	ts := h.buildTypeString(st.String())
 	_, sv, _ = h.reducePointerTypeValue(st, sv)
 
@@ -528,13 +538,13 @@ func (h *developHandler) formatMap(st reflect.Type, sv reflect.Value, l int) (b 
 		b = append(b, bytes.Repeat([]byte(" "), pc-len(tb))...)
 		b = append(b, ':')
 		b = append(b, ' ')
-		b = append(b, h.elementType(v.Type(), v, l, l*2+pr+2)...)
+		b = append(b, h.elementType(v.Type(), v, l, l*2+pr+2, vi)...)
 	}
 
 	return b
 }
 
-func (h *developHandler) formatStruct(st reflect.Type, sv reflect.Value, l int) (b []byte) {
+func (h *developHandler) formatStruct(st reflect.Type, sv reflect.Value, l int, vi visited) (b []byte) {
 	b = h.buildTypeString(st.String())
 
 	_, sv, _ = h.reducePointerTypeValue(st, sv)
@@ -556,7 +566,7 @@ func (h *developHandler) formatStruct(st reflect.Type, sv reflect.Value, l int) 
 		b = append(b, bytes.Repeat([]byte(" "), pc-len(tb))...)
 		b = append(b, ':')
 		b = append(b, ' ')
-		b = append(b, h.elementType(t, v, l, l*2+pr+2)...)
+		b = append(b, h.elementType(t, v, l, l*2+pr+2, vi)...)
 	}
 
 	return b
@@ -564,7 +574,7 @@ func (h *developHandler) formatStruct(st reflect.Type, sv reflect.Value, l int) 
 
 var marshalTextInterface = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 
-func (h *developHandler) elementType(t reflect.Type, v reflect.Value, l int, p int) (b []byte) {
+func (h *developHandler) elementType(t reflect.Type, v reflect.Value, l int, p int, vi visited) (b []byte) {
 	if t.Implements(marshalTextInterface) {
 		return atb(v)
 	}
@@ -577,18 +587,26 @@ func (h *developHandler) elementType(t reflect.Type, v reflect.Value, l int, p i
 
 	switch v.Kind() {
 	case reflect.Array:
-		b = h.formatSlice(t, v, l+1)
+		b = h.formatSlice(t, v, l+1, vi)
 	case reflect.Slice:
-		b = h.formatSlice(t, v, l+1)
+		b = h.formatSlice(t, v, l+1, vi)
 	case reflect.Map:
-		b = h.formatMap(t, v, l+1)
+		b = h.formatMap(t, v, l+1, vi)
 	case reflect.Struct:
-		b = h.formatStruct(t, v, l+1)
+		b = h.formatStruct(t, v, l+1, vi)
 	case reflect.Pointer:
+		key := visitKey{
+			ptr: v.Pointer(),
+			typ: v.Type(),
+		}
+
 		if v.IsNil() {
 			b = h.nilString()
+		} else if _, ok := vi[key]; ok {
+			b = atb(v)
 		} else {
-			b = h.elementType(t, v.Elem(), l, p)
+			vi[key] = struct{}{}
+			b = h.elementType(t, v.Elem(), l, p, vi)
 		}
 	case reflect.Float32, reflect.Float64:
 		b = h.cs(atb(v.Float()), fgYellow)
@@ -616,7 +634,7 @@ func (h *developHandler) elementType(t reflect.Type, v reflect.Value, l int, p i
 			b = h.nilString()
 		} else {
 			v = reflect.ValueOf(v.Interface())
-			b = h.elementType(v.Type(), v, l, p)
+			b = h.elementType(v.Type(), v, l, p, vi)
 		}
 	default:
 		b = atb("Unknown type: ")
@@ -723,7 +741,7 @@ func (h *developHandler) reducePointerTypeValue(t reflect.Type, v reflect.Value)
 
 // Any to []byte using fmt.Sprintf
 func atb(a any) []byte {
-	return []byte(fmt.Sprintf("%v", a))
+	return fmt.Appendf(nil, "%v", a)
 }
 
 func isNilValue(v reflect.Value) bool {
